@@ -36,14 +36,47 @@ using namespace uix;
 #define ARCHITECTS_DAUGHTER_IMPLEMENTATION
 #include <assets/architects_daughter.hpp>
 static const open_font& text_font = architects_daughter;
-// downloaded for free from pngtree.com and header generated with
-// https://honeythecodewitch.com/gfx/generator
-#define SKETCHY_IMPLEMENTATION
-#include <assets/sketchy.hpp>
 
 // for Core2 power management
 static m5core2_power power;
 static ft6336<320,280> touch(Wire1);
+
+static int draw_state = 0;
+
+template<typename ControlSurfaceType>
+class canvas_touch : public canvas<ControlSurfaceType> {
+public:
+    using base_type = canvas<ControlSurfaceType>;
+    using pixel_type = typename base_type::pixel_type;
+    using palette_type = typename base_type::palette_type;
+    canvas_touch(uix::invalidation_tracker& parent, const palette_type* palette = nullptr)
+        : base_type(parent, palette) {
+    }
+    canvas_touch(canvas_touch&& rhs) {
+        do_move_control(rhs);
+    }
+    canvas_touch& operator=(canvas_touch&& rhs) {
+        do_move_control(rhs);
+        return *this;
+    }
+    canvas_touch(const canvas_touch& rhs) {
+        do_copy_control(rhs);
+    }
+    canvas_touch& operator=(const canvas_touch& rhs) {
+        do_copy_control(rhs);
+        return *this;
+    }
+    virtual bool on_touch(size_t locations_size,const spoint16* locations) override {
+        return true;
+    }
+    virtual void on_release() override {
+        ++draw_state;
+        if(draw_state>3) {
+            draw_state = 0;
+        }
+    }
+};
+
 
 // declare the format of the screen
 using screen_t = screen<rgb_pixel<16>>;
@@ -53,7 +86,7 @@ using color32_t = color<rgba_pixel<32>>;
 
 extern screen_t anim_screen;
 
-using canvas_t = canvas<typename screen_t::control_surface_type>;
+using canvas_t = canvas_touch<typename screen_t::control_surface_type>;
 using label_t = label<typename screen_t::control_surface_type>;
 // UIX allows you to use two buffers for maximum DMA efficiency
 // you don't have to, but performance is significantly better
@@ -80,7 +113,26 @@ static void uix_on_flush(const rect16& bounds, const void* bmp, void* state) {
     int x1 = bounds.x1, y1 = bounds.y1, x2 = bounds.x2 + 1, y2 = bounds.y2 + 1;
     esp_lcd_panel_draw_bitmap(lcd_handle, x1, y1, x2, y2, (void*)bmp);
 }
-
+// report touch values to UIX
+void uix_on_touch(point16* out_locations, 
+                    size_t* in_out_locations_size, 
+                    void* state) {
+    //delay(1);
+    if (touch.update()) {                                                  
+        if (touch.xy(&out_locations[0].x, &out_locations[0].y)) {          
+            if (*in_out_locations_size > 1) {                              
+                *in_out_locations_size = 1;                                
+                if (touch.xy2(&out_locations[1].x, &out_locations[1].y)) { 
+                    *in_out_locations_size = 2;                            
+                }                                                          
+            } else {                                                       
+                *in_out_locations_size = 1;                                
+            }                                                              
+        } else {                                                           
+            *in_out_locations_size = 0;                                    
+        }                                                                  
+    }
+}
 // initialize the screen using the esp panel API
 static void lcd_panel_init() {
 #ifdef LCD_PIN_NUM_BCKL
@@ -161,57 +213,98 @@ static void screen_init() {
         // these are all kept beteen calls:
         constexpr static const size_t count = 10;
         constexpr static const int16_t radius = 25;
-        static bool init=false;
         static spoint16 pts[count]; // locations
         static spoint16 dts[count]; // deltas
         static rgba_pixel<32> cls[count]; // colors
         // first time, we must initialize
-        if(!init) {
-            init = true;
-            for(size_t i = 0;i<count;++i) {
-                // start at the center
-                pts[i]=spoint16(destination.dimensions().width/2,destination.dimensions().height/2);
-                dts[i]={0,0};
-                // random deltas. Retry on (dx=0||dy=0)
-                while(dts[i].x==0||dts[i].y==0) {
-                    dts[i].x=(rand()%5)-2;
-                    dts[i].y=(rand()%5)-2;        
+        switch(draw_state) {
+            case 0:
+                for(size_t i = 0;i<count;++i) {
+                    // start at the center
+                    pts[i]=spoint16(destination.dimensions().width/2,destination.dimensions().height/2);
+                    dts[i]={0,0};
+                    // random deltas. Retry on (dx=0||dy=0)
+                    while(dts[i].x==0||dts[i].y==0) {
+                        dts[i].x=(rand()%5)-2;
+                        dts[i].y=(rand()%5)-2;        
+                    }
+                    // random color RGBA8888
+                    cls[i]=rgba_pixel<32>((rand()%255),(rand()%255),(rand()%255),(rand()%224)+32);
                 }
-                // random color RGBA8888
-                cls[i]=rgba_pixel<32>((rand()%255),(rand()%255),(rand()%255),(rand()%224)+32);
-            }
-        }
-        // draw a checkerboard
-        for(int y = 0;y<destination.dimensions().height;y+=16) {
-            for(int x = 0;x<destination.dimensions().width;x+=16) {
-                srect16 r(x,y,x+16,y+16);
-                if(r.intersects(clip)) {
-                    bool w = 0 != ((x + y) % 32);
-                    if(w) {
-                        draw::filled_rectangle(destination,r,color_t::white);
+                draw_state = 1;
+                // fall through
+                //break; 
+            case 1:
+                // draw a checkerboard
+                for(int y = 0;y<destination.dimensions().height;y+=16) {
+                    for(int x = 0;x<destination.dimensions().width;x+=16) {
+                        srect16 r(x,y,x+16,y+16);
+                        if(r.intersects(clip)) {
+                            bool w = 0 != ((x + y) % 32);
+                            if(w) {
+                                draw::filled_rectangle(destination,r,color_t::white);
+                            }
+                        }
+                    }    
+                }
+                // draw the circles
+                for(size_t i = 0;i<count;++i) {
+                    spoint16& pt = pts[i];
+                    spoint16& d = dts[i];
+                    srect16 r(pt,radius);
+                    if(clip.intersects(r)) {
+                        rgba_pixel<32>& col = cls[i];
+                        draw::filled_ellipse(destination,r,col,&clip);
+                    }
+                    // move the circle
+                    pt.x+=d.x;
+                    pt.y+=d.y;
+                    // if it is about to hit the edge, invert 
+                    // the respective deltas
+                    if(pt.x+d.x+-radius<=0 || pt.x+d.x+radius>=destination.bounds().x2) {
+                        d.x=-d.x;
+                    } 
+                    if(pt.y+d.y+-radius<=0 || pt.y+d.y+radius>=destination.bounds().y2) {
+                        d.y=-d.y;
                     }
                 }
-            }    
-        }
-        for(size_t i = 0;i<count;++i) {
-            spoint16& pt = pts[i];
-            spoint16& d = dts[i];
-            srect16 r(pt,radius);
-            if(clip.intersects(r)) {
-                rgba_pixel<32>& col = cls[i];
-                draw::filled_ellipse(destination,r,col,&clip);
-            }
-            // move the circle
-            pt.x+=d.x;
-            pt.y+=d.y;
-            // if it is about to hit the edge, invert 
-            // the respective deltas
-            if(pt.x+d.x+-radius<=0 || pt.x+d.x+radius>=destination.bounds().x2) {
-                d.x=-d.x;
-            } 
-            if(pt.y+d.y+-radius<=0 || pt.y+d.y+radius>=destination.bounds().y2) {
-                d.y=-d.y;
-            }
+                break;
+            case 2:
+                for(size_t i = 0;i<count/2;++i) {
+                    pts[i]=spoint16(0,(rand()%(destination.dimensions().height-(radius*2))+radius));
+                    dts[i]={0,0};
+                    // random deltas. Retry on (dx=0)
+                    while(dts[i].y==0) {
+                        dts[i].y=(rand()%5)-2;
+                    }
+                    // random color RGBA8888
+                    cls[i]=rgba_pixel<32>((rand()%255),(rand()%255),(rand()%255),/*(rand()%224)+32*/255);
+                }
+                draw_state = 3;
+                // fall through
+                //break; 
+            case 3:
+                // draw the bars
+                for(size_t i = 0;i<count/2;++i) {
+                    spoint16& pt = pts[i];
+                    spoint16& d = dts[i];
+                    srect16 r(pt,radius);
+                    r.x1 = 0;
+                    r.x2 = destination.bounds().x2;
+                    if(clip.intersects(r)) {
+                        rgba_pixel<32>& col = cls[i];
+                        draw::filled_rectangle(destination,r,col,&clip);
+                    }
+                    // move the bar
+                    pt.y+=d.y;
+                    // if it is about to hit the edge, invert 
+                    // the respective deltas
+                    if(pt.y+d.y+-radius<=0 || pt.y+d.y+radius>=destination.bounds().y2) {
+                        d.y=-d.y;
+                    }
+                    
+                }
+                break;
         }
     });
     fps_label.text_color(color32_t::red);
@@ -226,6 +319,7 @@ static void screen_init() {
     anim_screen.register_control(fps_label);
     anim_screen.background_color(color_t::black);
     anim_screen.on_flush_callback(uix_on_flush);
+    anim_screen.on_touch_callback(uix_on_touch);
 }
 // set up the hardware
 void setup() {
